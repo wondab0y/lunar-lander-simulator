@@ -72,7 +72,7 @@ def lander_derivatives(state: list[float], throttle: float) -> list[float]:
             [altitude, velocity, mass]
 
         throttle:
-            Engine throttle in range [0, 1].
+            engine throttle in range [0, 1].
 
     return:
         [dh_dt, dv_dt, dm_dt]
