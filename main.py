@@ -12,6 +12,7 @@ from constants import (
     INITIAL_MASS,
     DT,
 )
+from controller import BangBangController, PIDController
 from integrator import step
 from simulation import check_landing_status, clamp_to_ground
 from physics import fuel_remaining
@@ -34,7 +35,7 @@ LANDER_HEIGHT = 52
 
 STAR_COUNT = 120
 PLOT_TIME_WINDOW = 40.0
-BRAKE_WARNING_DURATION = 2.0
+BRAKE_WARNING_DURATION = 3.0
 BRAKE_WARNING_BLINKS_PER_SECOND = 3.0
 
 TelemetrySample = tuple[float, float, float, float, float]
@@ -261,7 +262,7 @@ def get_manual_throttle(keys, has_fuel: bool) -> float:
     return 0.0
 
 
-def draw_hud(screen, font, state, throttle, status, time, ran_out_of_fuel):
+def draw_hud(screen, font, state, throttle, status, time, ran_out_of_fuel, autopilot_mode):
     altitude, velocity, mass = state
     fuel = fuel_remaining(mass)
 
@@ -274,11 +275,12 @@ def draw_hud(screen, font, state, throttle, status, time, ran_out_of_fuel):
     draw_text(screen, font, f"Mass: {mass:.2f} kg", 20, 110)
     draw_text(screen, font, f"Fuel: {fuel:.2f} kg", 20, 140, fuel_color)
     draw_text(screen, font, f"Throttle: {throttle * 100:.0f}%", 20, 170)
-    draw_text(screen, font, f"Integrator: {METHOD}", 20, 200)
-    draw_text(screen, font, f"Status: {status}", 20, 230)
+    draw_text(screen, font, f"Autopilot: {autopilot_mode or 'OFF'}", 20, 200)
+    draw_text(screen, font, f"Integrator: {METHOD}", 20, 230)
+    draw_text(screen, font, f"Status: {status}", 20, 260)
 
     draw_text(screen, font, "UP: 25% | RIGHT: 50% | DOWN: 75% | SPACE: 100%", 20, 585)
-    draw_text(screen, font, "R: restart | ESC: quit", 20, 615)
+    draw_text(screen, font, "P: PID | B: bang-bang | R: restart | ESC: quit", 20, 615)
 
     if velocity < -30 and status == "flying":
         draw_text(screen, font, "WARNING: DESCENDING TOO FAST", 285, 40, (255, 80, 80))
@@ -306,6 +308,9 @@ def main():
     ran_out_of_fuel = False
     brake_warning_until = 0.0
     brake_warning_needed_last_frame = False
+    pid_autopilot = PIDController(kp=0.4, kd=0.5, descent_gain=0.59)
+    bang_bang_autopilot = BangBangController()
+    autopilot_mode = None
 
     running = True
 
@@ -328,6 +333,25 @@ def main():
                     ran_out_of_fuel = False
                     brake_warning_until = 0.0
                     brake_warning_needed_last_frame = False
+                    pid_autopilot.reset()
+                    bang_bang_autopilot.reset()
+                    autopilot_mode = None
+
+                if event.key == pygame.K_p and status == "flying":
+                    autopilot_mode = None if autopilot_mode == "PID" else "PID"
+                    pid_autopilot.reset()
+                    bang_bang_autopilot.reset()
+                    if autopilot_mode:
+                        brake_warning_until = 0.0
+                        brake_warning_needed_last_frame = False
+
+                if event.key == pygame.K_b and status == "flying":
+                    autopilot_mode = None if autopilot_mode == "Bang-Bang" else "Bang-Bang"
+                    pid_autopilot.reset()
+                    bang_bang_autopilot.reset()
+                    if autopilot_mode:
+                        brake_warning_until = 0.0
+                        brake_warning_needed_last_frame = False
 
         keys = pygame.key.get_pressed()
 
@@ -337,7 +361,12 @@ def main():
         if not has_fuel and altitude > 0:
             ran_out_of_fuel = True
 
-        throttle = get_manual_throttle(keys, has_fuel)
+        if autopilot_mode == "PID" and has_fuel:
+            throttle = pid_autopilot.update(state, DT)
+        elif autopilot_mode == "Bang-Bang" and has_fuel:
+            throttle = bang_bang_autopilot.update(state, DT)
+        else:
+            throttle = get_manual_throttle(keys, has_fuel)
 
         if status == "flying":
             state = step(state, throttle, DT, METHOD)
@@ -358,6 +387,7 @@ def main():
 
         brake_warning_needed = (
             status == "flying"
+            and autopilot_mode is None
             and needs_brake_now(altitude, velocity, mass, fuel_remaining(mass) > 0)
         )
 
@@ -369,8 +399,9 @@ def main():
         draw_background(screen, stars)
         draw_lander(screen, altitude, throttle)
         draw_live_plots(screen, font, telemetry)
-        draw_hud(screen, font, state, throttle, status, time, ran_out_of_fuel)
-        draw_brake_warning(screen, big_font, time, brake_warning_until)
+        draw_hud(screen, font, state, throttle, status, time, ran_out_of_fuel, autopilot_mode)
+        if status == "flying" and autopilot_mode is None:
+            draw_brake_warning(screen, big_font, time, brake_warning_until)
 
         if status == "landed":
             draw_text(screen, big_font, "SAFE LANDING", 330, 295, (80, 255, 120))
