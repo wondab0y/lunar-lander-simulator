@@ -1,5 +1,6 @@
 import random
 import math
+from pathlib import Path
 from typing import Optional
 
 import pygame
@@ -14,6 +15,7 @@ from constants import (
 )
 from controller import BangBangController, PIDController
 from integrator import step
+from rl_agent import QLearningController, SmoothQLearningController
 from simulation import check_landing_status, clamp_to_ground
 from physics import fuel_remaining
 
@@ -37,6 +39,8 @@ STAR_COUNT = 120
 PLOT_TIME_WINDOW = 40.0
 BRAKE_WARNING_DURATION = 3.0
 BRAKE_WARNING_BLINKS_PER_SECOND = 3.0
+RL_Q_TABLE_FILE = "q_table.pkl"
+SMOOTH_RL_Q_TABLE_FILE = "smooth_q_table.pkl"
 
 TelemetrySample = tuple[float, float, float, float, float]
 
@@ -280,7 +284,7 @@ def draw_hud(screen, font, state, throttle, status, time, ran_out_of_fuel, autop
     draw_text(screen, font, f"Status: {status}", 20, 260)
 
     draw_text(screen, font, "UP: 25% | RIGHT: 50% | DOWN: 75% | SPACE: 100%", 20, 585)
-    draw_text(screen, font, "P: PID | B: bang-bang | R: restart | ESC: quit", 20, 615)
+    draw_text(screen, font, "P: PID | B: bang-bang | L: RL | S: smooth RL | R: restart | ESC: quit", 20, 615)
 
     if velocity < -30 and status == "flying":
         draw_text(screen, font, "WARNING: DESCENDING TOO FAST", 285, 40, (255, 80, 80))
@@ -310,6 +314,12 @@ def main():
     brake_warning_needed_last_frame = False
     pid_autopilot = PIDController(kp=0.4, kd=0.5, descent_gain=0.59)
     bang_bang_autopilot = BangBangController()
+    rl_autopilot = QLearningController()
+    if Path(RL_Q_TABLE_FILE).exists():
+        rl_autopilot.load(RL_Q_TABLE_FILE)
+    smooth_rl_autopilot = SmoothQLearningController()
+    if Path(SMOOTH_RL_Q_TABLE_FILE).exists():
+        smooth_rl_autopilot.load(SMOOTH_RL_Q_TABLE_FILE)
     autopilot_mode = None
 
     running = True
@@ -335,12 +345,32 @@ def main():
                     brake_warning_needed_last_frame = False
                     pid_autopilot.reset()
                     bang_bang_autopilot.reset()
+                    smooth_rl_autopilot.reset()
                     autopilot_mode = None
+
+                if event.key == pygame.K_l and status == "flying":
+                    autopilot_mode = None if autopilot_mode == "RL" else "RL"
+                    pid_autopilot.reset()
+                    bang_bang_autopilot.reset()
+                    smooth_rl_autopilot.reset()
+                    if autopilot_mode:
+                        brake_warning_until = 0.0
+                        brake_warning_needed_last_frame = False
+
+                if event.key == pygame.K_s and status == "flying":
+                    autopilot_mode = None if autopilot_mode == "Smooth RL" else "Smooth RL"
+                    pid_autopilot.reset()
+                    bang_bang_autopilot.reset()
+                    smooth_rl_autopilot.reset()
+                    if autopilot_mode:
+                        brake_warning_until = 0.0
+                        brake_warning_needed_last_frame = False
 
                 if event.key == pygame.K_p and status == "flying":
                     autopilot_mode = None if autopilot_mode == "PID" else "PID"
                     pid_autopilot.reset()
                     bang_bang_autopilot.reset()
+                    smooth_rl_autopilot.reset()
                     if autopilot_mode:
                         brake_warning_until = 0.0
                         brake_warning_needed_last_frame = False
@@ -349,6 +379,7 @@ def main():
                     autopilot_mode = None if autopilot_mode == "Bang-Bang" else "Bang-Bang"
                     pid_autopilot.reset()
                     bang_bang_autopilot.reset()
+                    smooth_rl_autopilot.reset()
                     if autopilot_mode:
                         brake_warning_until = 0.0
                         brake_warning_needed_last_frame = False
@@ -365,6 +396,10 @@ def main():
             throttle = pid_autopilot.update(state, DT)
         elif autopilot_mode == "Bang-Bang" and has_fuel:
             throttle = bang_bang_autopilot.update(state, DT)
+        elif autopilot_mode == "RL" and has_fuel:
+            throttle = rl_autopilot.get_throttle(state)
+        elif autopilot_mode == "Smooth RL" and has_fuel:
+            throttle = smooth_rl_autopilot.get_throttle(state)
         else:
             throttle = get_manual_throttle(keys, has_fuel)
 
