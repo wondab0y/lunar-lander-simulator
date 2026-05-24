@@ -410,8 +410,6 @@ def main():
 
             status = check_landing_status(state)
 
-            # If the spacecraft ran out of fuel before touching the ground,
-            # we count the final impact as a crash.
             if status == "landed" and ran_out_of_fuel:
                 status = "crashed"
 

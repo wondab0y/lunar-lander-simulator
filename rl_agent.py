@@ -42,6 +42,8 @@ SMOOTH_FRAME_PENALTY = 0.35
 SMOOTH_FUEL_PENALTY = 0.20
 SMOOTH_SPEED_PENALTY = 0.01
 SMOOTHNESS_PENALTY = 0.75
+SMOOTH_THROTTLE_DEADBAND = 0.08
+SMOOTH_THROTTLE_RATE_LIMIT = 0.02
 
 
 class QLearningController:
@@ -141,7 +143,7 @@ class SmoothQLearningController(QLearningController):
         alpha: float = 0.12,
         gamma: float = 0.995,
         epsilon: float = 0.12,
-    ):
+        ):
         super().__init__(alpha=alpha, gamma=gamma, epsilon=epsilon)
         self.previous_throttle = 0.0
 
@@ -149,15 +151,17 @@ class SmoothQLearningController(QLearningController):
         self.previous_throttle = 0.0
 
     def fallback_throttle(self, state: list[float]) -> float:
-        target_throttle = super().fallback_throttle(state)
+        altitude, velocity, mass = state
 
-        if target_throttle > self.previous_throttle:
-            return min(1.0, self.previous_throttle + 0.25)
+        if altitude < 10.0 and abs(velocity) <= SAFE_LANDING_SPEED:
+            return 0.0
 
-        if target_throttle < self.previous_throttle:
-            return max(0.0, self.previous_throttle - 0.25)
+        target_velocity = -0.59 * max(altitude, 0.0) ** 0.5
+        error = target_velocity - velocity
 
-        return target_throttle
+        desired_acceleration = 0.15 * error
+        required_thrust = mass * (MOON_GRAVITY + desired_acceleration)
+        return max(0.0, min(1.0, required_thrust / MAX_THRUST))
 
     def discretize_state_with_previous_throttle(
         self,
@@ -212,15 +216,26 @@ class SmoothQLearningController(QLearningController):
         )
         q_values = self.get_q_values(discrete_state)
 
-        if max(q_values) - min(q_values) < MIN_POLICY_CONFIDENCE:
-            throttle = self.fallback_throttle(state)
-        else:
-            action_index = max(range(len(ACTIONS)), key=lambda i: q_values[i])
-            throttle = ACTIONS[action_index]
+        smooth_safety_throttle = self.fallback_throttle(state)
+        emergency_throttle = super().fallback_throttle(state)
 
-        safety_throttle = self.fallback_throttle(state)
-        if safety_throttle > throttle:
-            throttle = safety_throttle
+        throttle = smooth_safety_throttle
+
+        if max(q_values) - min(q_values) >= MIN_POLICY_CONFIDENCE:
+            action_index = max(range(len(ACTIONS)), key=lambda i: q_values[i])
+            learned_adjustment = (ACTIONS[action_index] - 0.5) * 0.04
+            throttle = smooth_safety_throttle + learned_adjustment
+
+        low = max(0.0, smooth_safety_throttle - 0.25, emergency_throttle)
+        high = min(1.0, smooth_safety_throttle + 0.02)
+        throttle = max(low, min(high, throttle))
+
+        if abs(throttle - self.previous_throttle) < SMOOTH_THROTTLE_DEADBAND:
+            throttle = self.previous_throttle
+        elif throttle > self.previous_throttle:
+            throttle = min(throttle, self.previous_throttle + SMOOTH_THROTTLE_RATE_LIMIT)
+        else:
+            throttle = max(throttle, self.previous_throttle - SMOOTH_THROTTLE_RATE_LIMIT)
 
         self.previous_throttle = throttle
         return throttle
